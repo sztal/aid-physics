@@ -1,0 +1,140 @@
+---
+title: "Preliminary analysis of algorithmic complexity of systems of coupled logistic maps"
+description: |
+    The main goal is to differentiate between synchronized and desynchronized systems
+    based solely on metrics derived from algorithmic complexity.
+author:
+  - name: Szymon Talaga and Mikołaj Biesaga
+    affiliation: The Robert Zajonc Institute for Social Studies
+    affiliation_url: http://iss.uw.edu.pl/en/
+date: "`r Sys.Date()`"
+output: radix::radix_article
+bibliography: Algorithmic-Information.bib
+---
+
+```{r setup_knitr, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r setup_environment}
+library(tidyverse)
+library(reticulate)
+library(ggpubr)
+library(nlme)
+library(emmeans)
+library(broom)
+
+# Set up ggplot aesthetics
+theme_set(theme_bw())
+# Use conda env for python
+use_condaenv("bdm")
+
+# Globals
+HERE <- file.path(here::here(), "Logistic")
+DATA_PATH <- file.path(HERE, "data")
+```
+
+```{r functions}
+# Discretize to uniform bins
+discretize_u <- function(x, n) {
+    cut(x, breaks = 0:n/n, include.lowest = TRUE)%>%
+        as.integer
+}
+```
+
+
+```{r get_data}
+D <- read_tsv(file.path(DATA_PATH, "logistic.tsv")) %>%
+    group_by(idx, n, r, alpha, n_steps) %>%
+    mutate(
+        t = 1:length(x_i),
+        synced = round(last(var), 4) == 0
+    ) %>%
+    ungroup
+```
+
+```{r check_synchronization}
+D %>%
+    group_by(idx, n, r, alpha) %>%
+    summarize(var = round(last(var), 3))
+```
+
+```{r viz_data, fig.width = 8, fig.asp = 1}
+D %>%
+    # filter(synced) %>%
+    ggplot(aes(x = t, y = order, color = alpha, group = interaction(idx, alpha))) +
+    geom_point(size = .25) +
+    facet_grid(r ~ n) +
+    scale_color_gradient(name = "Coupling", low = "black", high = "green3")
+```
+
+
+
+```{r viz_magnetization_density, fig.width = 6, fig.asp = .618}
+M %>%
+    ggplot(aes(x = m, fill = as.factor(idx))) +
+    geom_density() +
+    facet_wrap(~phase, ncol = 1, scales = "free_y") +
+    scale_fill_manual(values = COLORS, name = "") +
+    labs(x = "Magnetization", y = "Probability density")
+```
+
+```{r viz_magnetization_ts, fig.width = 6, fig.asp = .618}
+M %>%
+    ggplot(aes(x = t, y = m, color = as.factor(idx)), group = as.factor(idx)) +
+    geom_line() +
+    facet_wrap(~phase, ncol = 1) +
+    scale_color_manual(values = COLORS, name = "") +
+    labs(x = "Time step", y = "Magnetization")
+```
+
+```{python get_bdm}
+import warnings
+import numpy as np
+from bdm import BDM
+
+def get_bdm(x, nsymbols, ent=False):
+    x = np.array([ _ for _ in x ]).astype(int)
+    bdm = BDM(ndim=1, nsymbols=nsymbols, warn_if_missing_ctm=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return bdm.ent(x) if ent else bdm.bdm(x)
+```
+
+```{r compute_bdm, warning=FALSE}
+# Complexity measures for magnetization
+C_m <- map(c(2, 4, 5, 6, 9), ~{
+    c1 <- sym(str_c("cmx_u", .x))
+    e1 <- sym(str_c("ent_u", .x))
+    m1 <- sym(str_c("m_u", .x))
+    gdf <- M %>%
+        group_by(phase, idx) %>%
+        summarize(
+            !!c1 := py$get_bdm(!!m1, nsymbols = .x),
+            !!e1 := py$get_bdm(!!m1, nsymbols = .x, ent = TRUE),
+        ) %>%
+        ungroup
+}) %>%
+    reduce(left_join, by = c("idx", "phase")) %>%
+    select(idx, phase, starts_with("cmx_u"), starts_with("ent_u"), starts_with("cmx_q"), starts_with("ent_q"))
+```
+
+### Magnetization
+
+```{r magnetization_ts, fig.width = 6, fig.asp = .618}
+C_m %>%
+    select(-matches("[dq]\\d")) %>%
+    gather(key = "metric", value = "value", -phase, -idx) %>%
+    mutate(
+        measure = if_else(str_detect(metric, "^cmx"), "algorithmic complexity", "block entropy"),
+        nsymbols = as.integer(str_extract(metric, "\\d$"))
+    ) %>%
+    ggplot(aes(x = nsymbols, y = value, color = phase, group = interaction(phase, idx))) +
+    geom_line() +
+    geom_point(pch = 16, size = 3) +
+    facet_wrap(~measure, scales = "free_y") +
+    scale_color_manual(values = COLORS, name = "Phase") +
+    scale_x_continuous(breaks = c(2, 4, 5, 6, 9)) +
+    labs(x = "Number of equal length bins", y = "") +
+    theme(legend.position = "top")
+```
